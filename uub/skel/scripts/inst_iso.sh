@@ -4,8 +4,8 @@
 #
 set -euf -o pipefail
 mydir=$(dirname "$(readlink -f "$0")")
-
 . "$mydir/lib.sh"
+saved_args="$(print_args -1 "$@")"
 
 usage() {
   cat 1>&2 <<-_EOF_
@@ -45,8 +45,15 @@ main() {
     # R/W FS...
     :
   else
+    [ -n "$bootdir" ] && bootdir="--boot=$bootdir"
+
+    oIFS="$IFS"
+    IFS="$(echo | tr '\n' '\1')"
+    set - $saved_args
+    IFS="$oIFS"
+    unset oIFS
     set -x
-    exec "$mydir/run.sh" --boot="$bootdir" "$0" --boot="$bootdir" "$srcfile"
+    exec "$mydir/run.sh" $bootdir "$0" "$@"
     exit $?
   fi
 

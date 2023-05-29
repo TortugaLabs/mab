@@ -4,8 +4,9 @@
 #
 set -euf -o pipefail
 target=
-rbootdir=/media/usb
+rbootdir=/media/boot
 skel=$(dirname $(dirname $(readlink -f "$0")))
+. "$skel/scripts/lib.sh"
 
 while [ $# -gt 0 ]
 do
@@ -17,7 +18,7 @@ do
 done
 
 if [ $# -eq 0 ] ; then
-  echo "Usage; $0 [--boot=/media/usb] target"
+  echo "Usage; $0 [--boot=/media/boot] target"
   exit 1
 fi
 
@@ -34,7 +35,6 @@ else
   ro=true
 fi
 
-set -x
 if $ro ; then
   ssh "$target" mount -o remount,rw "$rbootdir"
   trap 'ssh "$target" mount -o remount,ro "$rbootdir"' EXIT
@@ -42,5 +42,5 @@ if $ro ; then
 fi
 
 tar -zcf - -C "$skel" $(cd "$skel" ; find . -maxdepth 1 -mindepth 1 | sed -e 's!^./!!') \
-    | ssh "$target" tar -C "$rbootdir" -zxvf -
+    |  ( ssh "$target" tar -C "$rbootdir" -zxvf - 2>&1 | summarize  )
 
