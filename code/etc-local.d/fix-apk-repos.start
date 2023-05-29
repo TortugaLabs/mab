@@ -1,0 +1,81 @@
+#!/bin/sh
+#
+# Automatically configure repo versions
+#
+
+repocfg=/etc/apk/repositories
+
+check_opt() {
+  local out=echo
+  if [ x"$1" = x"-q" ] ; then
+    out=:
+    shift
+  fi
+  local flag="$1" ; shift
+  [ $# -eq 0 ] && set - $(cat /proc/cmdline)
+
+  for j in "$@"
+  do
+    if [ x"${j%=*}" = x"$flag" ] ; then
+      $out "${j#*=}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+fix_local_repos() {
+  while read ln
+  do
+    if (echo "$ln" | grep -q '^:/media/') ; then
+      echo ":$alpine_repo"
+      cat
+      break
+    fi
+    echo "$ln"
+  done
+}
+
+fix_remote_repos() {
+  sed -e 's!/v[0-9][0-9]*\.[0-9][0-9]*/!/v'"$alpine_rel"'/!'
+}
+
+if apkdir=$(check_opt apks) ; then
+  # Determine alpine version from kernel cmdline
+  alpine_ver=$(echo "$apkdir" | cut -d/ -f1 | sed -e 's/^alpine-[a-z]*-//')
+  alpine_rel=$(echo "$alpine_ver" | cut -d. -f-2)
+
+  for j in /media/* ''
+  do
+    [ -d "$j/$apkdir" ] && break
+  done
+  if [ -z "$j" ] ; then
+    echo "Unable to determine boot media" >/dev/console
+    exit 1
+  fi
+  alpine_repo="$j/$apkdir"
+else
+  relfile=/etc/alpine-release
+  [ -f $relfile ] || exit 0
+  alpine_ver=$(cat $relfile)
+  alpine_rel=$(cut -d. -f-2 < $relfile)
+
+  for j in /media/* ''
+  do
+    [ -f "$j/apks/.boot_repository" ] && break
+  done
+  if [ -z "$j" ] ; then
+    echo "Unable to find boot repository" >/dev/console
+    exit 2
+  fi
+  alpine_repo="$j/apks"
+fi
+
+pretxt=$(sed -e 's/^/:/' $repocfg)
+newtxt=$(echo "$pretxt" | fix_remote_repos | fix_local_repos)
+
+if [ x"$pretxt" != x"$newtxt" ] ; then
+  # Update APK repository files.
+  echo "Updating APK repository links ($alpine_ver)" >/dev/console
+  echo "$newtxt" | sed -e 's/^://' | tee $repocfg | md5sum
+fi

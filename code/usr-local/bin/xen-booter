@@ -1,0 +1,225 @@
+#!/bin/sh
+#(
+#  echo "CLI: $*"
+#  env | sort
+#) > /tmp/xenboot.log
+#
+# tags:alpine-xen
+# target::/usr/local/bin/
+# mode:755
+#
+# Boot from a syslinux configuration
+#
+set -euf -o pipefail
+
+#~ exec >/tmp/bl 2>&1
+#~ echo ": $*"
+#~ set -x
+
+fatal() {
+  echo "$@" 1>&2
+  exit 2
+}
+
+fix_args() {
+  #  enable Xen console... boot messages
+  echo "$* console=hvc0" \
+    | sed -e 's/console=ttyS0,*\d*//'
+}
+
+write_config() {
+  local kernel="$1" initrd="$2" args="$3"
+  args="$(fix_args "$args")"
+  (
+    case "$fmt" in
+    sxp)
+      echo -n "linux (kernel $kernel)"
+      [ -n "$initrd" ] && echo -n "(ramdisk $initrd)"
+      [ -n "$args" ] && echo -n "(args $args)"
+      ;;
+    simple)
+      echo "kernel $kernel"
+      [ -n "$initrd" ] && echo "ramdisk $initrd"
+      [ -n "$args" ] && echo "args $args"
+      ;;
+    simple0)
+      printf "kernel $kernel\0"
+      [ -n "$initrd" ] && printf "ramdisk $initrd\0"
+      [ -n "$args" ] && printf "args $args\0"
+      ;;
+    esac
+  ) > "$output"  
+}
+
+
+find_bootfile() {
+  [ -z "$1" ] && return
+  local file="$1" i q ; shift
+  for i in "$@"
+  do
+    for q in "" "/"
+    do
+      if [ -f "$i$q$file" ] ; then
+        echo "$i$q$file"
+	return
+      fi
+    done
+  done
+}
+
+boot_setup() {
+  local kernel="$1" initrd="$2" args="$3" ; shift 3
+  local kipath="$(find_bootfile "$kernel" "$@")" ripath="$(find_bootfile "$initrd" "$@")"
+  shift 3
+  if [ -z "$kipath" ] ; then
+    echo "$kernel: kernel not found" 1>&2
+    return 12
+  fi
+  if [ -n "$initrd" ] && [ -z "$ripath" ] ; then
+    echo "$initrd: RAM disk not found" 1>&2
+    return 13
+  fi
+  local rpath="$outdir/$(basename "$initrd")"
+  if ! cp -a "$ripath" "$rpath" ; then
+    echo "$rpath: Unable to create ramdisk file" 1>&2
+    return 14
+  fi
+  local kpath="$outdir/$(basename "$kernel")"
+  if ! cp -a "$kipath" "$kpath" ; then
+    echo "$kpath: Unable to create kernel file" 1>&2
+    return 15
+  fi
+  if ! write_config "$kpath" "$rpath" "$args" ; then
+    echo "Error writing boot config" 1>&2
+    return 16
+  fi
+  return 0
+}
+
+parse_syslinux() {
+  awk 'BEGIN { output = 1; default = "*" }
+	$1 == "DEFAULT" { output = 0; default = $2 }
+	$1 == "LABEL" {
+	  output = 0;
+	  if (default == "*") { default = "-"; output = 1 }
+	  if (default == $2) { default = "-"; output = 1 }
+	}
+	$1 == "'"$1"'" { if (output) {$1 = ""; print } }' "$2" | sed -e 's/^ *//' | head -1
+}
+
+read_syslinux() {
+  local mntdir="$1" ; shift
+
+  # Find syslinux.cfg...
+  syslinux_cfg=$(find "$mntdir" -maxdepth 3 -type f -name syslinux.cfg|head -1)
+  if [ -z "$syslinux_cfg" ] ; then
+    echo "Missing syslinux configuration" 1>&2
+    return 1
+  fi
+
+  local kernel=$(parse_syslinux KERNEL "$syslinux_cfg")
+  if [ -z "$kernel" ] ; then
+    echo "No kernel found" 1>&2
+    return 2
+  fi
+  local initrd=$(parse_syslinux INITRD "$syslinux_cfg")
+  local args=$(parse_syslinux APPEND "$syslinux_cfg")
+  boot_setup "$kernel" "$initrd" "$args" "$tempdir" "$(dirname "$syslinux_cfg")"
+  return $?
+}
+
+ro_mount() {
+  # Identify the fs type...
+  local fstype=$(eval "$(blkid "$1" | cut -d: -f2-)  ; echo \$TYPE")
+  mount -t "$fstype" -r "$@"
+}
+  
+
+bootsys() {
+  local src="$1" rc=0
+
+  if [ -b "$src" ] ; then
+    # This is a block device... we can mount directly...
+    local tempdir=$(mktemp -d)
+    if ro_mount "$src" "$tempdir" ; then
+      read_syslinux "$tempdir" || rc=$?
+      umount "$tempdir"
+    else
+      rc=4
+    fi
+    rmdir "$tempdir"
+  elif [ -f "$src" ] ; then
+    local loopdev=$(losetup -f)
+    if ! losetup -r $loopdev "$src" ; then
+      echo "Unable to setup loop device: $src" 1>&2
+      return 6
+    fi
+    local tempdir=$(mktemp -d)
+    if ro_mount "$loopdev" "$tempdir" ; then
+      read_syslinux "$tempdir" || rc=$?
+      umount "$tempdir"
+    else
+      rc=7
+    fi
+    losetup -d "$loopdev" || :
+    rmdir "$tempdir"
+  else
+    echo "Unsupported: $src" 1>&2
+    return 8
+  fi
+  return $rc
+}
+  
+outdir=''
+runme=''
+output=''
+fmt=''
+
+while [ $# -gt 0 ]
+do
+  case "$1" in
+  --output=*)
+    output=${1#--output=}
+    ;;
+  --output-format=*)
+    fmt=${1#--output-format=}
+    ;;
+  --output-directory=*)
+    outdir=${1#--output-directory=*}
+    ;;
+  --run=*)
+    runme=${1#--run=}
+    ;;
+  -D*)
+    # Export variables
+    export "${1#-D}"
+    ;;
+  *)
+    break
+    ;;
+  esac
+  shift
+done
+
+[ -z "$output" ] && fatal "No output file specified"
+[ ! -f "$output" ] && fatal "$output: No output file found"
+[ -z "$outdir" ] && fatal "No output directory specified"
+[ ! -d "$outdir" ] && fatal "$outdir: is not a directory"
+[ -z "$fmt" ] && fatal "No output format specified"
+
+if bootsys "$1" ; then
+  if [ -n "$runme" ] ; then
+    "$runme" "$@" || exit 1
+  fi
+  exit 0
+else
+  exit 1
+fi
+   
+
+
+
+
+    
+
+

@@ -1,0 +1,12 @@
+#!/bin/sh
+#
+# tags:alpine-xen
+# target::/etc/local.d/
+# mode:755
+
+# Tweak xen configuration
+#
+if  [ -e /proc/xen/capabilities ] && grep -q control_d /proc/xen/capabilities ; then
+  # Do this only for a Dom0 domain boot
+  xl sched-credit2 -d Domain-0 -w 512
+fi

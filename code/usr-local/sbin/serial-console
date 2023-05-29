@@ -1,0 +1,100 @@
+#!/bin/sh
+set -euf -o pipefail
+
+update_inittab() {
+  local inittab=/etc/inittab mdev="$1" ndev="$2" xline="$3"
+  local cur=$(sed -e 's/^/:/' < "$inittab")
+  local new=$(echo "$cur" | awk -vFS=: '
+    BEGIN { notfound = 1; OFS=":"; }
+    $2 == "#'$mdev'" { $2 = "'$ndev'"; notfound = 0; }
+    $2 == "'$mdev'" { $2 = "'$ndev'"; notfound = 0; }
+    { print }
+    END {
+      if (notfound) {
+        print "","'$ndev'","'"$xline"'";
+      }
+    }
+  ')
+  if [ x"$new" != x"$cur" ] ; then
+    # Updating inittab
+    echo "$new" | sed -e 's/^://' > "$inittab"
+    kill -1 1
+  fi
+}
+
+
+update_mdev() {
+  local conf=/etc/mdev.conf devprefix=ttyUSB mode=diff backup=""
+  local O=$(readlink -f "$0") diff_opts=""
+  while [ $# -gt 0 ]
+  do
+    case "$1" in
+    --dev=*) devprefix=${1#--dev=} ;;
+    --diff) mode=diff ;;
+    --diff=*) mode=diff ; diff_opts=${1#--diff=} ;;
+    --print) mode=print ;;
+    -i*) mode=inplace ; backup=${1#-i} ;;
+    --in-place) mode=inplace ;;
+    --in-place=*) mode=inplace ; backup=${1#--in-place} ;;
+    *) conf="$1" ; shift ; break ;;
+    esac
+    shift
+  done
+  sedexpr='s!^#*\('"$devprefix"'[^@\*]*\)[@\*].*$!\1*'"$O"'!'
+  case "$mode" in
+  diff)
+    t=$(mktemp)
+    trap "rm -f $t" EXIT
+    trap "exit 1" INT
+    sed -e  "$sedexpr" "$conf" > "$t"
+    diff $diff_opts -u  "$conf" "$t"
+    ;;
+
+  print)
+    sed -e  "$sedexpr" "$conf"
+    ;;
+  inplace)
+    t=$(mktemp)
+    trap "rm -f $t" EXIT
+    trap "exit 1" INT
+    sed -e  "$sedexpr" "$conf" > "$t"
+    if ! diff $diff_opts -u  "$conf" $t ; then
+      [ -n "$backup" ] && cp -av "$conf" "${conf}${backup}"
+      cat "$t" > "$conf"
+    fi
+    ;;
+  esac
+
+}
+
+# update_inittab ttyUSB0 '#ttyUSB0' ':respawn:/sbin/getty -L ttyUSB0 115200 vt100'
+
+if [ $# -eq 0 ] ; then
+  if [ -z "${ACTION:-}" ] || [ -z "${MDEV:-}" ] ; then
+    echo "Must run from mdev.conf or use: $0 add|remove MDEV" 1>&2
+    echo "Install mdev rules: $0 install" 1>&2
+    exit 1
+  fi
+  set - "${ACTION}" "${MDEV}"
+fi
+
+[ $# -gt 1 ] && iniline=":respawn:/sbin/getty -L $2 115200 vt100"
+case "$1" in
+add)
+  update_inittab "$2" "$2" "$iniline"
+  ;;
+remove)
+  update_inittab "$2" "#$2" "$iniline"
+  ;;
+install)
+  shift
+  update_mdev "$@"
+  ;;
+*)
+  echo "$1: unknown op" 1>&2
+  exit 40
+  ;;
+esac
+
+
+

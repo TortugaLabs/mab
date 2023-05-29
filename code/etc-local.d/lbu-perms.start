@@ -1,0 +1,11 @@
+#!/bin/sh
+
+awk '{
+  print $2
+}' /etc/fstab | while read mpnt
+do
+  [ -z "$mpnt" ] && continue
+  if [ -n "$(find "$mpnt" -maxdepth 1 -mindepth 1 -name '*.apkovl.tar.gz')" ] ; then
+    umount "$mpnt" && mount -v "$mpnt"
+  fi
+done

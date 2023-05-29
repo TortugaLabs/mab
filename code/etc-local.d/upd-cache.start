@@ -1,0 +1,122 @@
+#!/bin/sh
+# tags:alpine-locald
+# target::/etc/local.d/
+# mode:755
+
+reboot_timer=10
+
+check_opt() {
+  local out=echo
+  if [ x"$1" = x"-q" ] ; then
+    out=:
+    shift
+  fi
+  local flag="$1" ; shift
+  [ $# -eq 0 ] && set - $(cat /proc/cmdline)
+
+  for j in "$@"
+  do
+    if [ x"${j%=*}" = x"$flag" ] ; then
+      $out "${j#*=}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+timed_reboot() {
+  lbu ci
+  cat <<-'_EOF_'
+	##############################################################
+	|  _____      _                 _   _             _
+	| |  __ \    | |               | | (_)           | |
+	| | |__) |___| |__   ___   ___ | |_ _ _ __   __ _| |
+	| |  _  // _ \ '_ \ / _ \ / _ \| __| | '_ \ / _` | |
+	| | | \ \  __/ |_) | (_) | (_) | |_| | | | | (_| |_| _  _  _
+	| |_|  \_\___|_.__/ \___/ \___/ \__|_|_| |_|\__, (_)(_)(_)(_)
+	|					     __/ |
+	|					    |___/
+	##############################################################
+	_EOF_
+  for n in $(seq -w $reboot_timer -1 0)
+  do
+      echo -ne "\rRebooting in $n"
+      sleep 1
+  done
+  reboot
+}
+
+fix_apk_ptrs() {
+  if ! apkdir=$(check_opt apks) ; then
+    # No apks option in cmdline
+    echo 'No APKS in kernel command line'
+    return 1
+  fi
+  # Determine alpine version from kernel cmdline
+  alpine_ver=$(echo "$apkdir" | cut -d/ -f1 | sed -e 's/^alpine-[a-z]*-//')
+  alpine_rel=$(echo "$alpine_ver" | cut -d. -f-2)
+  cache=$(readlink /etc/apk/cache)
+
+  alpine_pl=$(echo "$alpine_ver" | cut -d. -f3)
+  
+  if [ -d "$cache" ] && [ $(basename "$cache") = "$alpine_rel" ] ; then
+    # Valid cache found
+    echo "Cache: $cache"
+    return 0
+  fi
+
+  # Find boot drive
+  for j in /media/* ''
+  do
+    [ -d "$j/$apkdir" ] && break
+  done
+  if [ -z "$j" ] ; then
+    # Unable to find boot media
+    echo 'Unable to identify boot device'
+    return 1
+  fi
+  newcache=$j/cache/$alpine_rel
+
+  if [ -d "$newcache" ] ; then
+    # Cache already exist...
+    if [ "$cache" != "$newcache" ] ; then
+      # just switch to it...
+      echo "Switching cache: $cache -> $newcache"
+      rm -f /etc/apk/cache
+      ln -s "$newcache" /etc/apk/cache
+    fi
+    # Reboot so that packages come from the correct cache
+    timed_reboot
+    return 0
+  fi
+  if [ -d /etc/apk/cache ] ; then
+    # Cache still exists, but wrong version...
+    echo "Removing old cache pointer: $cache"
+    rm -f /etc/apk/cache
+    # reboot so that cache sync works later
+    timed_reboot
+    return 0
+  fi
+
+  echo "Rebuild cache: $newcache"
+  setup-apkcache "$newcache"
+  apk update || exit 0
+
+  old=$(ls -l /etc/apk/cache/|md5sum)
+  apk cache sync || exit 0
+  new=$(ls -l /etc/apk/cache/|md5sum)
+
+  if [ x"$old" != x"$new" ] ; then
+    timed_reboot
+  fi
+}
+
+fix_apk_ptrs > /dev/console
+
+
+
+
+
+
+
+

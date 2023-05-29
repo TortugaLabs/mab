@@ -1,0 +1,31 @@
+#!/bin/sh
+
+# tags:alpine-locald
+# target::/etc/local.d/
+# mode:755
+
+# uname output
+linux=$(uname -s -r -v)
+arch=$(uname -m)
+[ x"$(uname -p)" != x"unknown" ] && arch="$arch $(uname -p)"
+
+
+
+if [ -f /etc/os-release ] ; then
+  . /etc/os-release
+  desc="$NAME"
+  [ -n "$VERSION_ID" ] && desc="$desc ($VERSION_ID)"
+else
+  desc=''
+fi
+
+cat >/etc/motd <<_EOF_
+    .--.
+   |o_o |
+   |:_/ |	Welcome to $(hostname) ($arch)
+  //   \ \	$linux
+ (|     | )	$desc
+/'\_   _/\`\\
+\\___)=(___/
+
+_EOF_
