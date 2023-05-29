@@ -1,0 +1,49 @@
+#!/bin/sh
+set -euf -o pipefail
+#
+# Backup config from a Alpine instance
+#
+O=$(basename "$0")
+media_path="/media/usb;/media/data"
+mydir=$(dirname "$0")
+
+usage() {
+  cat <<-_EOF_
+	Usage: $O [options] target
+	_EOF_
+  exit 0
+}
+
+while [ $# -gt 0 ]
+do
+  case "$1" in
+  --media=*) media_path=${1#--media=} ;;
+  *) break ;;
+  esac
+  shift
+done
+
+[ $# -eq 0 ] && usage
+target="$1" ; shift
+case "$target" in
+ -a) # Read inventory...
+   if [ ! -f "$mydir/inventory.txt" ] ; then
+     echo "Must create $mydir/inventory.txt"
+     exit 1
+   fi
+   sed -e 's/#.*$//' "$mydir/inventory.txt" | xargs
+   exit
+   ;;
+esac
+
+ping -c 1 "${target#*@}"
+
+ssh "$target" find $(echo $media_path | tr ';' ' ') -type f -name '*.apkovl.tar.gz' \
+    | (
+  count=0
+  while read fp
+  do
+    bf=$(basename "$fp" | sed -e 's/^\([^\.]*\)\..*\.apkovl\.tar\.gz$/\1/')
+    scp -p "$target":"$fp" "$mydir/$bf.$(date +%Y-%m-%d).apkovl.tar.gz"
+  done
+)

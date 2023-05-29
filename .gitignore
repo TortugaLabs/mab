@@ -1,0 +1,4 @@
+netflat
+*.img
+*.qcow2
+*.iso
