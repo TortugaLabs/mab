@@ -41,6 +41,15 @@ main() {
     esac
   fi
 
+  if "$mydir/run.sh" --boot="$bootdir" --test ; then
+    # R/W FS...
+    :
+  else
+    set -x
+    exec "$mydir/run.sh" --boot="$bootdir" "$0" --boot="$bootdir" "$srcfile"
+    exit $?
+  fi
+
   [ -z "$bootdir" ] && bootdir=$(dirname "$mydir")
   parse_iso_name "$srcfile"
 

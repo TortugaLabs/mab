@@ -9,6 +9,7 @@ usage() {
   cat 1>&2 <<-_EOF_
 	Usage: $0 [options] cmd
 	--boot : Specify the boot directory.
+	--test: just check if R/O status (exit 1 if ro-fs)
 	_EOF_
   exit
 }
@@ -40,7 +41,9 @@ main() {
   [ -e "$bootdir/ro-check" ] && cleanup=false
   if touch "$bootdir/ro-check" ; then
     $cleanup && rm -f "$bootdir/ro-check"
+    [ x"$1" = x"--test" ] && exit 0
   else
+    [ x"$1" = x"--test" ] && exit 1
     mount -o remount,rw "$bootdir"
     trap 'mount -o remount,ro "$bootdir"' EXIT
     trap 'exit 1' INT # Need this so that EXIT handler gets called on CTRL+C

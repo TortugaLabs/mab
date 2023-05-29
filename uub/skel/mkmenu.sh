@@ -6,25 +6,33 @@
 #
 set -euf -o pipefail
 
-read_cmdline() {
-  local f="$1" ; shift
-  if [ -f "$f" ] ; then
-    sed -e 's/#.*$//' "$f" | tr '\n' ' '
-  else
-    echo "$*"
-  fi
+read_opts() {
+  [ ! -f "$1" ] && return 1
+  sed -e 's/#.*$//' "$1" | tr '\n' ' '
+  return $?
 }
 
-std_kopts() {
-  local kver="$1" kvar="$2" ; shift 2
+xen_opts() {
+  local kver="$1" i; shift
+  for i in "$bootdir/$kver/xen_opts.txt" "$bootdir/xen_opts.txt"
+  do
+    read_opts "$i" && return
+  done
+}
 
-  local f_opts="modloop=$kver/boot/modloop-$kvar"
+linux_opts() {
+  local kver="$1" flavor="$2" i ; shift
+
+  [ "$flavor" = "xen" ] && flavor="lts"
+  echo -n "modloop=$kver/boot/modloop-$flavor "
   if [ -d "$bootdir/$kver/apks" ] ; then
-    # Add media repos
-    f_opts="$f_opts apks=$kver/apks"
+    echo -n "apks=$kver/apks "
   fi
-  f_opts="$f_opts $(read_cmdline "$bootdir/$kver/cmdline" "$@")"
-  echo $f_opts
+  for i in "$bootdir/$kver/cmdline.txt" "$bootdir/cmdline.txt"
+  do
+    read_opts "$i" && return
+  done
+  echo "modules=loop,squashfs,sd-mod,usb-storage quiet"
 }
 
 find_kernels() {
@@ -33,6 +41,10 @@ find_kernels() {
   do
     kver=$(echo "$k" | cut -d/ -f1)
     kfs=$(basename "$k" | cut -d- -f2)
+    if [ -f "$bootdir/$(dirname "$k")/xen.gz" ] ; then
+      # Special handling for Xen kernels
+      echo $kver,xen
+    fi
     echo $kver,$kfs
   done) | sort -r -V
 }
@@ -67,26 +79,38 @@ pick_kernel() {
   default_k="$c"
 }
 
-gen_refind_menu() {
-  [ ! -d "$bootdir/EFI/BOOT" ] && return
-  ( exec >"$bootdir/EFI/BOOT/refind.conf"
-    echo "Creating REFIND menu" 1>&2
+k_date() {
+  local flavor="$1"
+  [ "$flavor" = "xen" ] && flavor=lts
+  date --reference="$bootdir/$kver/boot/vmlinuz-$flavor" +"%Y-%m-%d"
 
-    echo "scanfor manual"
-    echo "timeout $timeout"
-    echo "default_selection $default_k"
+}
 
-    for kvalue in $(find_kernels)
+gen_grub_menu() {
+  [ ! -d "$bootdir/boot/grub" ] && return
+  ( exec >"$bootdir/boot/grub/grub.cfg"
+    echo "Creating GRUB menu" 1>&2
+
+    echo "set timeout=$timeout"
+    echo "set default=$default"
+
+    for kvalue in $kernels
     do
-      kver=$(echo $kvalue | cut -d, -f1)
-      kvar=$(echo $kvalue | cut -d, -f2)
+      local \
+	kver=$(echo $kvalue | cut -d, -f1)
+	kvar=$(echo $kvalue | cut -d, -f2)
 
-      date=$(date --reference="$bootdir/$kver/boot/vmlinuz-$kvar" +"%Y-%m-%d")
-
-      echo "menuentry \"$kvalue ($date)\" {"
-      echo "  loader $kver/boot/vmlinuz-$kvar"
-      echo "  initrd $kver/boot/initramfs-$kvar"
-      echo "  options \"$(std_kopts "$kver" "$kvar" $def_cmdline)\""
+      echo "menuentry \"$kvalue ($(k_date $kvar))\" --id $kvalue {"
+      echo "  echo \"Booting $kvalue ...\""
+      if [ "$kvar" = "xen" ] ; then
+        # This is a Xen kernel
+	echo "  multiboot2 /$kver/boot/xen.gz $(xen_opts "$kver")"
+	echo "  module2 /$kver/boot/vmlinuz-lts $(linux_opts "$kver" "$kvar")"
+	echo "  module2 /$kver/boot/initramfs-lts"
+      else
+	echo "  linux /$kver/boot/vmlinuz-$kvar $(linux_opts "$kver" "$kvar")"
+	echo "  initrd /$kver/boot/initramfs-$kvar"
+      fi
       echo "}"
     done
   )
@@ -96,7 +120,7 @@ gen_syslinux_menu() {
   ( exec > "$bootdir/syslinux.cfg"
     echo "Creating syslinux menu" 1>&2
 
-    if [ -f "$bootdir/menu.c32" ] ; then
+    if [ -f "$bootdir/bios/menu.c32" ] ; then
       echo "PROMPT 0"
       echo "UI menu.c32"
     else
@@ -111,20 +135,19 @@ gen_syslinux_menu() {
       local \
 	kver=$(echo $kvalue | cut -d, -f1)
 	kvar=$(echo $kvalue | cut -d, -f2)
-      local date=$(date --reference="$bootdir/$kver/boot/vmlinuz-$kvar" +"%Y-%m-%d")
 
       echo "LABEL $kvalue"
-      echo "  MENU LABEL $kvalue ($date)"
-      if [ -f "$bootdir/$kver/boot/xen.gz" ] ; then
+      echo "  MENU LABEL $kvalue ($(k_date $kvar))"
+      if [ "$kvar" = "xen" ] ; then
         # This is a Xen kernel
-	echo "  KERNEL $kver/boot/syslinux/mboot.c32"
-	echo "  APPEND /$kver/boot/xen.gz --- /$kver/boot/vmlinuz-$kvar $(std_kopts "$kver" "$kvar" $def_cmdline) --- /$kver/boot/initramfs-$kvar"
+	echo "  KERNEL mboot.c32"
+	echo "  APPEND /$kver/boot/xen.gz --- /$kver/boot/vmlinuz-lts $(linux_opts "$kver" "$kvar") --- /$kver/boot/initramfs-lts"
       else
 	echo "  KERNEL $kver/boot/vmlinuz-$kvar"
 	echo "  INITRD $kver/boot/initramfs-$kvar"
-	echo "  APPEND $(std_kopts "$kver" "$kvar" $def_cmdline)"
-	echo ""
+	echo "  APPEND $(linux_opts "$kver" "$kvar")"
       fi
+      echo ""
     done
   )
 }
@@ -133,11 +156,10 @@ bootdir=$(cd $(dirname $0) && pwd)
 [ -z "$bootdir" ] &&  exit 1
 
 kernels=$(find_kernels)
-def_cmdline=$(read_cmdline "$bootdir/cmdline" auto)
 
 default=$(echo "$kernels" | head -1)
 default_k=1
-timeout=3
+timeout=10
 uefi=true
 bios=true
 
@@ -156,9 +178,12 @@ do
   shift
 done
 
-$uefi && gen_refind_menu
+$uefi && gen_grub_menu
 $bios && gen_syslinux_menu
 
+# label
+# size
+# tar/dir
 
 
 

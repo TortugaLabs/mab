@@ -6,7 +6,15 @@ set -euf -o pipefail
 MAXPART=8192 # only use 8G of partitioned space
 syslinux_lib=/usr/lib/syslinux
 mydir=$(dirname "$(readlink -f "$0")")
+savedargs=$(for i in "$@" ; do echo "$i" ; done)
 
+if [ -n "${SAVED_ARGS:-}" ] ; then
+  oIFS="$IFS"
+  IFS="$(echo | tr '\n' '\1')"
+  set - $(echo "$SAVED_ARGS" | tr '\n' '\1')
+  IFS=$oIFS
+  unset oIFS
+fi
 . "$mydir/skel/scripts/lib.sh"
 
 check_opt() {
@@ -49,7 +57,7 @@ prep_image() {
   if [ -z "$psiz" ] ; then
     # So, there is no partition size specified...
     # Pick one based on the device size...
-    local dsiz=$(expr $(numfmt --from=iec "$img_sz") / 1024 / 1024)
+    local dsiz=$(numfmt --to-unit=Mi --from=iec "$img_sz")
     if [ -n "$dsiz" ] ; then
       if [ $dsiz -gt $MAXPART ] ; then # We really don't need more than 8 GB
 	psiz=$MAXPART
@@ -73,6 +81,7 @@ prep_image() {
   sfdisk "$img" <<-_EOF_
 	label: dos
 	;${psiz}M;c;*
+	$(data_part)
 	_EOF_
 
   local part_data=$(
@@ -91,6 +100,8 @@ prep_image() {
     part_size=$(check_opt size $part_opts)
   local offset=$(expr $part_start '*' $sector_size)
 
+  data_part_offset "$part_data"
+
   # Format partition
   label="ALPS$(printf "%04d" $(expr $RANDOM % 10000))"
   mkfs.vfat \
@@ -99,12 +110,14 @@ prep_image() {
 	-S $sector_size --offset $part_start \
 	-v "$img"  $(expr $part_size '*' $sector_size / 1024)
   mtools_img="$img@@$offset"
+  mmd -i "$mtools_img" "::bios"
 
   echo "Installing SYSLINUX"
 
   syslinux \
 	--install \
 	--offset $offset \
+	--directory bios \
 	--force \
 	"$img" || :
 }
@@ -137,6 +150,7 @@ prep_drive() {
   sfdisk $bdev <<-_EOF_
 	label: gpt
 	;${psiz}M;uefi;*
+        $(data_part)
 	_EOF_
   sleep 2
 
@@ -145,6 +159,8 @@ prep_drive() {
     *) mtools_img="${bdev}1" ;;
   esac
   [ ! -b ${mtools_img} ] && die "Failed to create partitions"
+
+  data_part_offset
 
   # Format partition
   label="ALPS$(printf "%04d" $(expr $RANDOM % 10000))"
@@ -155,15 +171,112 @@ prep_drive() {
 
 }
 
+data_part() {
+  $data || return 0
+  echo ";${data_size};linux;"
+}
+
+data_part_offset() {
+  $data || return 0
+  if [ $# -eq 0 ] ; then
+    data_bdev="${bdev}2"
+    data_opts=""
+  else
+    local \
+      part_opts=$(echo "$1" | grep '/PART2 :' | cut -d: -f2-)
+    local \
+      part_start=$(check_opt start $part_opts) \
+      part_size=$(check_opt size $part_opts)
+
+    data_opts=",offset=$(expr $part_start '*' $sector_size)"
+    data_bdev="$img"
+
+    data_size=$(expr $part_size '*' $sector_size / $data_bsize)
+  fi
+}
+
+data_mkfs() {
+  $data || return 0
+
+  local t=$(mktemp -d) rc=0
+  (
+    trap 'rm -rf $t' EXIT
+    trap 'exit' INT
+
+    if [ -f "$data_src" ] ; then
+      echo "Unpacking data tarball"
+      tar -C "$t" -zxvf "$data_src" | summarize
+      data_src="$t"
+    fi
+
+    set -x
+    mke2fs -F \
+	-t $data_type \
+	-b $data_bsize \
+	-d "$data_src" \
+	-E "root_owner=0:0$data_opts" \
+	-L "$data_label" \
+	"$data_bdev" $data_size
+  ) || rc=0
+  return "$rc"
+}
+
+config_bios() {
+  local fsdir="$1" x
+  mkdir -p "$fsdir/bios"
+  for x in menu libutil libcom32 mboot
+  do
+    [ ! -f "$syslinux_lib/$x.c32" ] && continue
+    cp -av "$syslinux_lib/$x.c32" "$fsdir/bios"
+  done
+}
+
+config_uefi() {
+  local dst="$1"
+
+  if [ -f "$mydir/bootx64.efi" ] ; then
+    mkdir -p "$dst/EFI/BOOT"
+    cp -av "$mydir/bootx64.efi" "$dst/EFI/BOOT"
+    mkdir -p "$dst/boot/grub"
+  fi
+}
 
 main() {
-  local psiz='' ovl=''
+  local psiz='' ovl='' serial=false data=false x_data=""
 
   while [ $# -gt 0 ]
   do
     case "$1" in
     --partsize=*) psiz=${1#--partsize=} ;;
     --ovl=*) ovl=${1#--ovl=} ;;
+    --serial) serial=true ;;
+    --data=*)
+      data=true ; x_data="$1"
+      data_src=$(echo "${1#--data=}" | cut -d, -f1)
+      data_size=$(IFS=, ; check_opt size ${1#--data=}) || :
+      data_type=$(IFS=, ; check_opt type ${1#--data=}) || data_type=ext4
+      data_label=$(IFS=, ; check_opt label ${1#--data=}) || data_label=$(basename "$data_src" .tar.gz)
+      data_bsize=$(IFS=, ; check_opt bsize ${1#--data=}) || data_bsize=4096
+      if [ -f "$data_src" ] ; then
+	case "$data_src" in
+	*.tar.gz) : ;;
+	*)
+	  echo "$data_src: Only .tar.gz format supported" 1>&2
+	  exit 40
+	  ;;
+	esac
+	data_fsz=$(expr $(stat -c '%s' "$data_src") / 1024 / 1024 '*' 4 / 3 + 1)
+      elif [ -d "$data_src" ] ; then
+	data_fsz=$(du -sm "$data_src" | (read a b ; echo ${a}M))
+      else
+        echo "$data_src: source not found" 1>&2
+	exit 38
+      fi
+      if [ -n "$data_size" ] && [ $(numfmt --to-unit=Mi --from=iec "$data_size") -lt $(numfmt --to-unit=Mi --from=iec "$data_fsz") ] ; then
+        echo "Partition size of $data_size is less than the file system size of $data_fsz" 1>&2
+	exit 52
+      fi
+      ;;
     *) break ;;
     esac
     shift
@@ -178,10 +291,11 @@ main() {
 	Options:
 	  --partsize=value: Partition size in Megs
 	    If not specified it defaults to entire drive up to 8GB.
+	  --data=xxx: Data partition specification (DEPRECATED)
 	  --ovl=apkovl : APK overlay file
 	  isofile : ISO file to use as the base alpine install
 	  usbhdd : /dev/path to the thumb drive that will be installed.
-	    Defaults to $devs or you can specified a image file
+	    Defaults to "$(echo $devs)" or you can specified a image file
 	    using:
 
 	    img:path/to/image/file[,size]
@@ -203,7 +317,7 @@ main() {
       if (echo "$bdev" | grep -q ,) ; then
         img_sz=${bdev#*,}
 	img=${bdev%,*}
-	die "img: $img - $img_sz"
+	#~ die "img: $img - $img_sz"
       else
 	img="$bdev"
 	img_sz=16G
@@ -231,7 +345,8 @@ main() {
   if [ $(id -u) -ne 0 ] ; then
     if ($is_iso && ! type 7z >/dev/null 2>&1) || [ -n "$bdev" ] ; then
       echo "Running sudo..." 1>&2
-      exec sudo "$0" --ovl="$ovl" --partsize="$psiz" "$iso" "$@"
+      exec sudo env SAVED_ARGS="$savedargs" "$0"
+      #~ exec sudo "$0" --ovl="$ovl" --partsize="$psiz" $x_data "$iso" "$@"
       exit 1
     fi
   fi
@@ -254,6 +369,7 @@ main() {
   else
     prep_image
   fi
+  $data && data_mkfs
 
   local tmp1=$(mktemp -d) rc=0
   trap 'exit 1' INT
@@ -272,6 +388,7 @@ main() {
     fi
     mkdir -p "$tmp1/src/apks"  # This is needed by alpine initramfs to boot properly
     > "$tmp1/src/apks/.boot_repository"
+
     # Hack initramfs
     find "$tmp1/src/$alpdir/boot" -type f -name 'initramfs-*' | while read rd
     do
@@ -279,25 +396,15 @@ main() {
       sh "$mydir/skel/scripts/tweak_initfs.sh" "$rd"
     done
 
-    # Add UEFI support
-    if [ -f "$mydir/BOOTX64.EFI" ] ; then
-      mkdir -p "$tmp1/src/EFI/BOOT"
-      cp -av "$mydir/BOOTX64.EFI" "$tmp1/src/EFI/BOOT"
+    echo 'Adding BIOS support...'
+    config_bios "$tmp1/src" | summarize
+    echo "Adding UEFI support..."
+    config_uefi "$tmp1/src" | summarize
+
+    if $serial ; then
+      echo "modules=loop,squashfs,sd-mod,usb-storage quiet console=tty0 console=ttyS0,115200" | tee "$tmp1/src/cmdline.txt"
     fi
 
-    ( echo $(sed -e 's/#.*$//') | tee "$tmp1/src/cmdline" ) <<-_EOF_
-	modules=loop,squashfs,sd-mod,usb-storage
-	quiet
-	#~ console=tty0
-	#~ console=ttyS0,115200
-	#~ single
-	_EOF_
-    for x in menu libutil libcom32
-    do
-      if [ -f "$syslinux_lib/$x.c32" ] ; then
-	cp -av "$syslinux_lib/$x.c32" "$tmp1/src"
-      fi
-    done
     sh "$tmp1/src/mkmenu.sh"
 
     # Copy OVL files if any
@@ -311,6 +418,7 @@ main() {
     do
       mcopy -i "$mtools_img" -s -p -Q -n -m -v "$src" "::"
     done ) 2>&1 | summarize "Writting IMG...DONE"
+
   ) || rc=$?
   exit $rc
 }
@@ -319,17 +427,3 @@ main() {
 main "$@"
 
 #
-#
-#~ alpine_repo=https://dl-cdn.alpinelinux.org/alpine/v3.17/main
-#~ echo "alpine_dev=LABEL=$label:vfat" | tee "$tmp1/src/cmdline"
-# root  alpine_start splash
-
-# The following values are supported:
-#   alpine_repo=auto	 -- default, search for .boot_repository
-#   alpine_repo=http://...   -- network repository
-#ALPINE_REPO=${KOPT_alpine_repo}
-#[ "$ALPINE_REPO" = "auto" ] && ALPINE_REPO=
-#
-# APINE_REPO=/media/{dev}/alpine-<>
-# find_boot_repositories > $repofile
-
