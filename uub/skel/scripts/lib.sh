@@ -152,3 +152,85 @@ bd_unused() {
 
 
 ###$_end-include: blkdevs.sh
+###$_begin-include: yesno.sh
+
+yesno() {
+        [ -z "${1:-}" ] && return 1
+
+        # Check the value directly so people can do:
+        # yesno ${VAR}
+        case "$1" in
+                [Yy][Ee][Ss]|[Tt][Rr][Uu][Ee]|[Oo][Nn]|1) return 0;;
+                [Nn][Oo]|[Ff][Aa][Ll][Ss][Ee]|[Oo][Ff][Ff]|0) return 1;;
+        esac
+
+        # Check the value of the var so people can do:
+        # yesno VAR
+        # Note: this breaks when the var contains a double quote.
+        local value=
+        eval value=\"\$$1\"
+        case "$value" in
+                [Yy][Ee][Ss]|[Tt][Rr][Uu][Ee]|[Oo][Nn]|1) return 0;;
+                [Nn][Oo]|[Ff][Aa][Ll][Ss][Ee]|[Oo][Ff][Ff]|0) return 1;;
+                *) echo "\$$1 is not set properly" 1>&2; return 1;;
+        esac
+}
+
+###$_end-include: yesno.sh
+###$_begin-include: print_args.sh
+
+print_args() {
+  [ "$#" -eq 0 ] && return 0
+  case "$1" in
+  --sep=*|-1)
+    if [ x"$1" = x"-1" ] ; then
+      local sep='\x1'
+    else
+      local sep="${1#--sep=}"
+    fi
+    shift
+    local i notfirst=false
+    for i in "$@"
+    do
+      $notfirst && echo -n -e "$sep" ; notfirst=true
+      echo -n "$i"
+    done
+    return
+    ;;
+  esac
+  local i
+  for i in "$@"
+  do
+    echo "$i"
+  done
+}
+
+###$_end-include: print_args.sh
+###$_begin-include: check_opt.sh
+
+check_opt() {
+  local out=echo default=
+  while [ $# -gt 0 ]
+  do
+    case "$1" in
+    -q) out=: ;;
+    --default=*) default=${1#--default=} ;;
+    *) break ;;
+    esac
+    shift
+  done
+  local flag="$1" ; shift
+  [ $# -eq 0 ] && set - $(cat /proc/cmdline)
+
+  for j in "$@"
+  do
+    if [ x"${j%=*}" = x"$flag" ] ; then
+      $out "${j#*=}"
+      return 0
+    fi
+  done
+  [ -n "$default" ] && $out "$default"
+  return 1
+}
+
+###$_end-include: check_opt.sh

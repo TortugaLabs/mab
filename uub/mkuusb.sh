@@ -2,11 +2,23 @@
 #
 # Create a USB from ISO
 #
+# TODO:
+# - partition should use the whole disk?
+#   - this is because if we create additional paritions
+#     it messes up the /media/usb mapping.
+#   - Otherwise, we should change the partition methodology
+#     allthough, this is more relevant in order to save
+#     apkovl into separate partition. But then fstab in OVL
+#     needs to be modified.
+#   - Alternatively, we can look into apkovl for LABEL names
+#
 set -euf -o pipefail
 MAXPART=8192 # only use 8G of partitioned space
 syslinux_lib=/usr/lib/syslinux
 mydir=$(dirname "$(readlink -f "$0")")
 savedargs=$(for i in "$@" ; do echo "$i" ; done)
+boot_label=
+data_label=
 
 if [ -n "${SAVED_ARGS:-}" ] ; then
   oIFS="$IFS"
@@ -103,7 +115,12 @@ prep_image() {
   data_part_offset "$part_data"
 
   # Format partition
-  label="ALPS$(printf "%04d" $(expr $RANDOM % 10000))"
+  if [ -n "$boot_label" ] ; then
+    label="$boot_label"
+  else
+    label="ALPS$(printf "%04d" $(expr $RANDOM % 10000))"
+    boot_label="$label"
+  fi
   mkfs.vfat \
 	-F 32 \
 	-n "$label" \
@@ -250,6 +267,7 @@ main() {
     --partsize=*) psiz=${1#--partsize=} ;;
     --ovl=*) ovl=${1#--ovl=} ;;
     --serial) serial=true ;;
+    --boot-label=*) boot_label=${1#--boot-label=} ;;
     --data=*)
       data=true ; x_data="$1"
       data_src=$(echo "${1#--data=}" | cut -d, -f1)
@@ -401,11 +419,8 @@ main() {
     echo "Adding UEFI support..."
     config_uefi "$tmp1/src" | summarize
 
-    if $serial ; then
-      echo "modules=loop,squashfs,sd-mod,usb-storage quiet console=tty0 console=ttyS0,115200" | tee "$tmp1/src/cmdline.txt"
-    fi
-
-    sh "$tmp1/src/mkmenu.sh"
+    ls -sh "$tmp1/src"
+    IN_CHROOT=true sh "$tmp1/src/mkmenu.sh" $($serial && echo --serial)
 
     # Copy OVL files if any
     if [ -n "$ovl" ] ; then
