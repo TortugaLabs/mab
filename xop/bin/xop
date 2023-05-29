@@ -1,0 +1,7 @@
+#!/bin/sh
+#
+# Xen Operations
+#
+export O=$(basename $0)
+exec $(dirname "$(readlink -f "$0")")/../lib/xop/xop.sh "$@"
+
